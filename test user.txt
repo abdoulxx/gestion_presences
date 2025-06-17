@@ -1,0 +1,687 @@
+peteyolivier@yahoo.fr	
+opetey
+12345678
+
+kangakoffi@gmail.com	
+kkanga
+cfb26a2a
+
+djebigabin@gmail.com
+gdjebi
+32d94e6e
+
+
+admin
+admin123
+
+
+
+
+
+
+
+
+
+
+<?php
+session_start();
+require_once('../config/db.php');
+
+// Vérifier si l'admin est connecté
+if (!isset($_SESSION['admin_id'])) {
+    header('Location: ../login.php');
+    exit();
+}
+
+// Traitement des actions POST
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (isset($_POST['action'])) {
+        switch ($_POST['action']) {
+            case 'ajouter':
+                try {
+                    // Validation des données
+                    if (empty($_POST['etudiant_id']) || empty($_POST['date_debut']) || 
+                        empty($_POST['date_fin']) || empty($_POST['motif'])) {
+                        throw new Exception('Tous les champs sont obligatoires');
+                    }
+
+                    // Préparation de la requête
+                    $stmt = $conn->prepare("
+                        INSERT INTO justificatifs 
+                        (etudiant_id, date_debut, date_fin, motif, document_path, statut) 
+                        VALUES (?, ?, ?, ?, ?, 'en_attente')
+                    ");
+
+                    // Exécution avec les données
+                    $stmt->execute([
+                        $_POST['etudiant_id'],
+                        $_POST['date_debut'],
+                        $_POST['date_fin'],
+                        $_POST['motif'],
+                        isset($_POST['document_path']) ? $_POST['document_path'] : null
+                    ]);
+
+                    header('Location: ' . $_SERVER['PHP_SELF'] . '?success=1');
+                    exit();
+
+                } catch (Exception $e) {
+                    header('Location: ' . $_SERVER['PHP_SELF'] . '?error=' . urlencode($e->getMessage()));
+                    exit();
+                }
+                break;
+
+            case 'changerStatut':
+                try {
+                    if (empty($_POST['justificatif_id']) || empty($_POST['statut'])) {
+                        throw new Exception('Données manquantes');
+                    }
+
+                    if (!in_array($_POST['statut'], ['accepte', 'refuse'])) {
+                        throw new Exception('Statut invalide');
+                    }
+
+                    // Vérifier que le justificatif existe et est en attente
+                    $stmt = $conn->prepare("SELECT id, statut FROM justificatifs WHERE id = ?");
+                    $stmt->execute([$_POST['justificatif_id']]);
+                    $justificatif = $stmt->fetch();
+
+                    if (!$justificatif) {
+                        throw new Exception('Justificatif introuvable');
+                    }
+
+                    if ($justificatif['statut'] !== 'en_attente') {
+                        throw new Exception('Ce justificatif a déjà été traité');
+                    }
+
+                    // Mettre à jour le statut
+                    $stmt = $conn->prepare("UPDATE justificatifs SET statut = ?, updated_at = NOW() WHERE id = ?");
+                    $stmt->execute([$_POST['statut'], $_POST['justificatif_id']]);
+
+                    header('Location: ' . $_SERVER['PHP_SELF'] . '?success=1');
+                    exit();
+
+                } catch (Exception $e) {
+                    header('Location: ' . $_SERVER['PHP_SELF'] . '?error=' . urlencode($e->getMessage()));
+                    exit();
+                }
+                break;
+        }
+    }
+}
+
+// Récupérer les classes pour le filtre
+$stmt = $conn->query("SELECT id, nom, niveau FROM classes ORDER BY niveau, nom");
+$classes = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Filtres
+$classe_id = isset($_GET['classe_id']) ? $_GET['classe_id'] : '';
+$date_debut = isset($_GET['date_debut']) ? $_GET['date_debut'] : date('Y-m-d');
+$date_fin = isset($_GET['date_fin']) ? $_GET['date_fin'] : date('Y-m-d');
+$statut = isset($_GET['statut']) ? $_GET['statut'] : '';
+
+// Récupérer les justificatifs
+$query = "
+    SELECT j.*, 
+           e.nom as etudiant_nom, e.prenom as etudiant_prenom,
+           c.nom as classe_nom, c.niveau as classe_niveau
+    FROM justificatifs j
+    JOIN users e ON j.etudiant_id = e.id
+    JOIN inscriptions i ON e.id = i.etudiant_id
+    JOIN classes c ON i.classe_id = c.id
+    WHERE 1=1
+";
+
+$params = [];
+
+if ($classe_id) {
+    $query .= " AND i.classe_id = :classe_id";
+    $params[':classe_id'] = $classe_id;
+}
+
+if ($statut) {
+    $query .= " AND j.statut = :statut";
+    $params[':statut'] = $statut;
+}
+
+if ($date_debut && $date_fin) {
+    $query .= " AND ((j.date_debut BETWEEN :date_debut AND :date_fin) 
+                  OR (j.date_fin BETWEEN :date_debut AND :date_fin))";
+    $params[':date_debut'] = $date_debut;
+    $params[':date_fin'] = $date_fin;
+}
+
+$query .= " ORDER BY j.created_at DESC";
+
+$stmt = $conn->prepare($query);
+$stmt->execute($params);
+$justificatifs = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+function formatDate($date) {
+    return date('d/m/Y', strtotime($date));
+}
+?>
+
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gestion des Justificatifs - Administration</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .sidebar {
+            background: linear-gradient(180deg, #764ba2 0%, #667eea 100%);
+            min-height: 100vh;
+            color: white;
+        }
+        .sidebar .nav-link {
+            color: rgba(255, 255, 255, 0.85);
+            padding: 0.5rem 1rem;
+            margin: 0.2rem 0;
+            border-radius: 0.25rem;
+        }
+        .sidebar .nav-link:hover {
+            color: white;
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+        .sidebar .nav-link.active {
+            color: white;
+            background-color: rgba(255, 255, 255, 0.2);
+        }
+        .sidebar .nav-link i {
+            width: 20px;
+        }
+        main {
+            margin-left: 240px;
+        }
+        .badge.statut-en_attente {
+            background-color: #ffc107;
+            color: #000;
+        }
+        .badge.statut-accepte {
+            background-color: #28a745;
+            color: #fff;
+        }
+        .badge.statut-refuse {
+            background-color: #dc3545;
+            color: #fff;
+        }
+        @media (max-width: 768px) {
+            main {
+                margin-left: 0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- Sidebar -->
+    <div class="sidebar position-fixed" style="width: 240px;">
+        <div class="p-3">
+            <div class="d-flex align-items-center mb-4 mt-2">
+                <i class="fas fa-user-shield fs-4 me-2"></i>
+                <h5 class="mb-0">Administration</h5>
+            </div>
+            <nav class="nav flex-column">
+                <a class="nav-link" href="dashboard.php">
+                    <i class="fas fa-home me-2"></i>
+                    Tableau de bord
+                </a>
+                <a class="nav-link" href="classes.php">
+                    <i class="fas fa-chalkboard me-2"></i>
+                    Classes
+                </a>
+
+                <a class="nav-link" href="etudiants.php">
+                    <i class="fas fa-user-graduate me-2"></i>
+                    Étudiants
+                </a>
+                <a class="nav-link" href="enseignants.php">
+                    <i class="fas fa-chalkboard-teacher me-2"></i>
+                    Enseignants
+                </a>
+                <a class="nav-link" href="attributions.php">
+                    <i class="fas fa-tasks me-2"></i>
+                    Attributions
+                </a>
+                <a class="nav-link " href="matieres.php">
+                    <i class="fas fa-book me-2"></i>
+                    Matières
+                </a>
+                <a class="nav-link" href="emploi_temps.php">
+                    <i class="fas fa-calendar-alt me-2"></i>
+                    Emploi du temps
+                </a>
+                <a class="nav-link" href="presences.php">
+                    <i class="fas fa-clipboard-check me-2"></i>
+                    Présences
+                </a>
+                <a class="nav-link active" href="justificatifs.php">
+                    <i class="fas fa-file-alt me-2"></i>
+                    Justificatifs
+                </a>
+                <a class="nav-link" href="parametres.php">
+                    <i class="fas fa-cog me-2"></i>
+                    Paramètres
+                </a>
+                <a class="nav-link text-danger mt-auto" href="../auth/logout.php">
+                    <i class="fas fa-sign-out-alt me-2"></i>
+                    Déconnexion
+                </a>
+            </nav>
+        </div>
+    </div>
+    <!-- Content -->
+    <div class="content" style="margin-left: 240px;">
+        <div class="container-fluid p-4">
+                <?php if (isset($_GET['error'])): ?>
+                <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                    <?php echo htmlspecialchars($_GET['error']); ?>
+                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                </div>
+                <?php endif; ?>
+
+                <?php if (isset($_GET['success'])): ?>
+                <div class="alert alert-success alert-dismissible fade show" role="alert">
+                    Opération réussie
+                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                </div>
+                <?php endif; ?>
+
+                <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+                    <h1 class="h2">Gestion des Justificatifs</h1>
+                    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#ajoutJustificatifModal">
+                        <i class="fas fa-plus me-2"></i>Ajouter un justificatif
+                    </button>
+                </div>
+
+                <!-- Filtres -->
+                <div class="card mb-4">
+                    <div class="card-body">
+                        <form method="GET" class="row g-3">
+                            <div class="col-md-3">
+                                <label for="classe_id" class="form-label">Classe</label>
+                                <select name="classe_id" id="classe_id" class="form-select">
+                                    <option value="">Toutes les classes</option>
+                                    <?php foreach ($classes as $classe): ?>
+                                        <option value="<?= $classe['id'] ?>" <?= $classe_id == $classe['id'] ? 'selected' : '' ?>>
+                                            <?= htmlspecialchars($classe['nom'] . ' (' . $classe['niveau'] . ')') ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+
+                            <div class="col-md-2">
+                                <label for="date_debut" class="form-label">Date début</label>
+                                <input type="date" class="form-control" id="date_debut" name="date_debut" value="<?= $date_debut ?>">
+                            </div>
+
+                            <div class="col-md-2">
+                                <label for="date_fin" class="form-label">Date fin</label>
+                                <input type="date" class="form-control" id="date_fin" name="date_fin" value="<?= $date_fin ?>">
+                            </div>
+
+                            <div class="col-md-3">
+                                <label for="statut" class="form-label">Statut</label>
+                                <select name="statut" id="statut" class="form-select">
+                                    <option value="">Tous les statuts</option>
+                                    <option value="en_attente" <?= $statut === 'en_attente' ? 'selected' : '' ?>>En attente</option>
+                                    <option value="accepte" <?= $statut === 'accepte' ? 'selected' : '' ?>>Accepté</option>
+                                    <option value="refuse" <?= $statut === 'refuse' ? 'selected' : '' ?>>Refusé</option>
+                                </select>
+                            </div>
+
+                            <div class="col-md-2 d-flex align-items-end">
+                                <button type="submit" class="btn btn-primary w-100">
+                                    <i class="fas fa-search me-2"></i>Filtrer
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Liste des justificatifs -->
+                <div class="table-responsive">
+                    <?php
+                    // Construction de la requête avec les filtres
+                    $sql = "
+                        SELECT j.*, u.nom as etudiant_nom, u.prenom as etudiant_prenom,
+                               c.nom as classe_nom, c.niveau as classe_niveau
+                        FROM justificatifs j
+                        JOIN users u ON j.etudiant_id = u.id
+                        JOIN inscriptions i ON u.id = i.etudiant_id
+                        JOIN classes c ON i.classe_id = c.id
+                        WHERE 1=1
+                    ";
+                    $params = [];
+
+                    if (!empty($_GET['classe_id'])) {
+                        $sql .= " AND i.classe_id = ?";
+                        $params[] = $_GET['classe_id'];
+                    }
+
+                    if (!empty($_GET['date_debut'])) {
+                        $sql .= " AND j.date_debut >= ?";
+                        $params[] = $_GET['date_debut'];
+                    }
+
+                    if (!empty($_GET['date_fin'])) {
+                        $sql .= " AND j.date_fin <= ?";
+                        $params[] = $_GET['date_fin'];
+                    }
+
+                    if (!empty($_GET['statut'])) {
+                        $sql .= " AND j.statut = ?";
+                        $params[] = $_GET['statut'];
+                    }
+
+                    $sql .= " ORDER BY j.created_at DESC";
+
+                    $stmt = $conn->prepare($sql);
+                    $stmt->execute($params);
+                    $justificatifs = $stmt->fetchAll();
+                    ?>
+
+                    <table class="table table-striped table-hover">
+                        <thead>
+                            <tr>
+                                <th>Étudiant</th>
+                                <th>Classe</th>
+                                <th>Période</th>
+                                <th>Motif</th>
+                                <th>Document</th>
+                                <th>Statut</th>
+                                <th>Date soumission</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php if (empty($justificatifs)): ?>
+                            <tr>
+                                <td colspan="8" class="text-center">Aucun justificatif trouvé</td>
+                            </tr>
+                            <?php else: ?>
+                            <?php foreach ($justificatifs as $j): ?>
+                            <tr>
+                                <td><?= htmlspecialchars($j['etudiant_nom'] . ' ' . $j['etudiant_prenom']) ?></td>
+                                <td><?= htmlspecialchars($j['classe_nom'] . ' (' . $j['classe_niveau'] . ')') ?></td>
+                                <td><?= date('d/m/Y', strtotime($j['date_debut'])) ?> - <?= date('d/m/Y', strtotime($j['date_fin'])) ?></td>
+                                <td><?= htmlspecialchars(substr($j['motif'], 0, 50)) . (strlen($j['motif']) > 50 ? '...' : '') ?></td>
+                                <td>
+                                    <?php if ($j['document_path']): ?>
+                                    <a href="../uploads/justificatifs/<?= htmlspecialchars($j['document_path']) ?>" target="_blank" class="btn btn-sm btn-primary">
+                                        <i class="fas fa-file"></i>
+                                    </a>
+                                    <?php endif; ?>
+                                </td>
+                                <td>
+                                    <span class="badge statut-<?= $j['statut'] ?>">
+                                        <?= $j['statut'] === 'en_attente' ? 'En attente' : ($j['statut'] === 'accepte' ? 'Accepté' : 'Refusé') ?>
+                                    </span>
+                                </td>
+                                <td><?= date('d/m/Y H:i', strtotime($j['created_at'])) ?></td>
+                                <td class="text-nowrap">
+                                    <button class="btn btn-sm btn-info me-1" onclick="voirJustificatif(<?= $j['id'] ?>)">
+                                        <i class="fas fa-eye"></i>
+                                    </button>
+                                    <?php if ($j['statut'] === 'en_attente'): ?>
+                                    <button class="btn btn-sm btn-success me-1" onclick="changerStatut(<?= $j['id'] ?>, 'accepte')">
+                                        <i class="fas fa-check"></i>
+                                    </button>
+                                    <button class="btn btn-sm btn-danger" onclick="changerStatut(<?= $j['id'] ?>, 'refuse')">
+                                        <i class="fas fa-times"></i>
+                                    </button>
+                                    <?php endif; ?>
+                                </td>
+                            </tr>
+                            <?php endforeach; ?>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal Ajout Justificatif -->
+    <div class="modal fade" id="ajoutJustificatifModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Ajouter un justificatif</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <form id="formJustificatif" action="<?php echo $_SERVER['PHP_SELF']; ?>" method="POST" enctype="multipart/form-data">
+                    <div class="modal-body">
+                        <input type="hidden" name="action" value="ajouter">
+                        
+                        <div class="mb-3">
+                            <label for="etudiant_id" class="form-label">Étudiant</label>
+                            <select name="etudiant_id" id="etudiant_id" class="form-select" required>
+                                <option value="">Sélectionner un étudiant</option>
+                                <?php
+                                $stmt = $conn->query("
+                                    SELECT u.id, u.nom, u.prenom, c.nom as classe_nom, c.niveau
+                                    FROM users u
+                                    JOIN inscriptions i ON u.id = i.etudiant_id
+                                    JOIN classes c ON i.classe_id = c.id
+                                    WHERE u.role = 'etudiant'
+                                    ORDER BY u.nom, u.prenom
+                                ");
+                                while ($etudiant = $stmt->fetch()) {
+                                    echo "<option value=\"{$etudiant['id']}\">"
+                                        . htmlspecialchars($etudiant['nom'] . ' ' . $etudiant['prenom'] 
+                                        . ' - ' . $etudiant['classe_nom'] . ' (' . $etudiant['niveau'] . ')')
+                                        . "</option>";
+                                }
+                                ?>
+                            </select>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="date_debut" class="form-label">Date début</label>
+                            <input type="date" name="date_debut" id="date_debut" class="form-control" required>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="date_fin" class="form-label">Date fin</label>
+                            <input type="date" name="date_fin" id="date_fin" class="form-control" required>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="motif" class="form-label">Motif</label>
+                            <textarea name="motif" id="motif" class="form-control" rows="3" required></textarea>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="document" class="form-label">Document justificatif</label>
+                            <input type="file" name="document" id="document" class="form-control" accept=".pdf,.jpg,.jpeg,.png">
+                            <div class="form-text">Formats acceptés : PDF, JPG, PNG. Taille max : 5MB</div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Annuler</button>
+                        <button type="submit" class="btn btn-primary">Enregistrer</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal Voir Justificatif -->
+    <div class="modal fade" id="voirJustificatifModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Détails du justificatif</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" id="justificatifDetails">
+                    <!-- Les détails seront chargés ici dynamiquement -->
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fermer</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        // Validation des dates
+        document.getElementById('date_fin').addEventListener('change', function() {
+            const dateDebut = document.getElementById('date_debut').value;
+            const dateFin = this.value;
+            
+            if (dateDebut && dateFin && dateDebut > dateFin) {
+                alert('La date de fin doit être postérieure à la date de début');
+                this.value = dateDebut;
+            }
+        });
+
+        // Gestion du formulaire d'ajout
+        document.getElementById('formJustificatif').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const fileInput = document.getElementById('document');
+            const submitButton = this.querySelector('button[type="submit"]');
+            submitButton.disabled = true;
+            
+            try {
+                if (fileInput.files.length > 0) {
+                    const file = fileInput.files[0];
+                    if (file.size > 5 * 1024 * 1024) {
+                        throw new Error('Le fichier est trop volumineux (max 5MB)');
+                    }
+
+                    // Upload du fichier
+                    const uploadFormData = new FormData();
+                    uploadFormData.append('document', file);
+                    
+                    const uploadResponse = await fetch('upload_justificatif.php', {
+                        method: 'POST',
+                        body: uploadFormData
+                    });
+                    
+                    if (!uploadResponse.ok) {
+                        throw new Error('Erreur réseau lors de l\'upload');
+                    }
+                    
+                    const uploadResult = await uploadResponse.json();
+                    if (!uploadResult.success) {
+                        throw new Error(uploadResult.message);
+                    }
+                    
+                    // Ajouter le nom du fichier au formulaire
+                    let documentPathInput = this.querySelector('input[name="document_path"]');
+                    if (!documentPathInput) {
+                        documentPathInput = document.createElement('input');
+                        documentPathInput.type = 'hidden';
+                        documentPathInput.name = 'document_path';
+                        this.appendChild(documentPathInput);
+                    }
+                    documentPathInput.value = uploadResult.fileName;
+                }
+                
+                // Soumettre le formulaire
+                this.submit();
+                
+            } catch (error) {
+                alert(error.message || 'Une erreur est survenue');
+                submitButton.disabled = false;
+            }
+    });
+
+    // Fonction pour voir les détails d'un justificatif
+    function voirJustificatif(id) {
+        fetch(`get_justificatif.php?id=${id}`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    alert(data.error);
+                    return;
+                }
+                
+                const details = document.getElementById('justificatifDetails');
+                details.innerHTML = `
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <p><strong>Étudiant :</strong> ${data.etudiant_nom} ${data.etudiant_prenom}</p>
+                            <p><strong>Classe :</strong> ${data.classe_nom} (${data.classe_niveau})</p>
+                            <p><strong>Période :</strong> ${formatDate(data.date_debut)} - ${formatDate(data.date_fin)}</p>
+                        </div>
+                        <div class="col-md-6">
+                            <p><strong>Statut :</strong> <span class="badge statut-${data.statut}">${formatStatut(data.statut)}</span></p>
+                            <p><strong>Date soumission :</strong> ${formatDate(data.created_at)}</p>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <h6>Motif :</h6>
+                        <p>${data.motif}</p>
+                    </div>
+                    ${data.document_path ? `
+                    <div class="mb-3">
+                        <h6>Document :</h6>
+                        <a href="../uploads/justificatifs/${data.document_path}" target="_blank" class="btn btn-sm btn-primary">
+                            <i class="fas fa-file-download me-2"></i>Télécharger le document
+                        </a>
+                    </div>
+                    ` : ''}
+                    ${data.statut === 'en_attente' ? `
+                    <div class="d-flex justify-content-end gap-2 mt-3">
+                        <button class="btn btn-success" onclick="changerStatut(${data.id}, 'accepte')">
+                            <i class="fas fa-check me-2"></i>Accepter
+                        </button>
+                        <button class="btn btn-danger" onclick="changerStatut(${data.id}, 'refuse')">
+                            <i class="fas fa-times me-2"></i>Refuser
+                        </button>
+                    </div>
+                    ` : ''}
+                `;
+                
+                new bootstrap.Modal(document.getElementById('voirJustificatifModal')).show();
+            })
+            .catch(error => {
+                console.error('Erreur:', error);
+                alert('Erreur lors du chargement des détails');
+            });
+    }
+
+    // Fonction pour changer le statut d'un justificatif
+    function changerStatut(id, statut) {
+        if (confirm(`Êtes-vous sûr de vouloir ${statut === 'accepte' ? 'accepter' : 'refuser'} ce justificatif ?`)) {
+            const formData = new FormData();
+            formData.append('action', 'changerStatut');
+            formData.append('justificatif_id', id);
+            formData.append('statut', statut);
+            
+            fetch(window.location.href, {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.ok ? window.location.reload() : Promise.reject())
+            .catch(() => alert('Erreur lors du changement de statut'));
+        }
+    }
+
+    // Fonction pour formater les dates
+    function formatDate(dateStr) {
+        const date = new Date(dateStr);
+        return date.toLocaleDateString('fr-FR');
+    }
+
+    // Fonction pour formater les statuts
+    function formatStatut(statut) {
+        const statuts = {
+            'en_attente': 'En attente',
+            'accepte': 'Accepté',
+            'refuse': 'Refusé'
+        };
+        return statuts[statut] || statut;
+    }
+    </script>
+</body>
+</html>
